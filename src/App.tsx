@@ -20,12 +20,13 @@ const MODE_KEY = 'cube-rush-mode';
 const HELP_SEEN_KEY = 'cube-rush-help-seen';
 const SENSITIVITY_KEY = 'cube-rush-sensitivity';
 
-/** 灵敏度(1-100) → 冲击阈值：灵敏度越高阈值越低 */
+/** 灵敏度(1-190) → 冲击阈值：灵敏度越高阈值越低 */
 function sensitivityToThreshold(sensitivity: number): number {
-  // sensitivity 1 → threshold 4.0 (很不灵敏)
-  // sensitivity 50 → threshold ~1.2 (默认)
-  // sensitivity 100 → threshold 0.2 (极度灵敏)
-  return 4.0 - (sensitivity - 1) * (3.8 / 99);
+  // 200 级精度，上限 95%（最大190）
+  // sensitivity 1   → threshold 4.0 (很不灵敏)
+  // sensitivity 95  → threshold ~1.2 (默认)
+  // sensitivity 190 → threshold 0.25 (很灵敏但不会过于灵敏)
+  return 4.0 - (sensitivity - 1) * (3.75 / 189);
 }
 
 function loadRecords(): SolveRecord[] {
@@ -53,7 +54,7 @@ export default function App() {
   const [showHelp, setShowHelp] = useState(!localStorage.getItem(HELP_SEEN_KEY));
   const [sensitivity, setSensitivity] = useState(() => {
     const saved = localStorage.getItem(SENSITIVITY_KEY);
-    return saved ? parseInt(saved, 10) : 50;
+    return saved ? Math.min(parseInt(saved, 10), 190) : 95;
   });
   const { time, phase, start, stop, reset, setReady, setPhase } = useTimer();
   const readyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -126,10 +127,12 @@ export default function App() {
     localStorage.setItem(SENSITIVITY_KEY, String(value));
   };
 
-  // ── 切换到传感器模式时检查权限 ──
+  // ── 传感器权限检测：仅在确认需要权限时显示横幅 ──
   useEffect(() => {
-    if (mode === 'sensor' && permissionGranted === null && sensorAvailable) {
+    if (mode === 'sensor' && permissionGranted === false && sensorAvailable) {
       setShowPermissionBanner(true);
+    } else {
+      setShowPermissionBanner(false);
     }
   }, [mode, permissionGranted, sensorAvailable]);
 
@@ -233,11 +236,6 @@ export default function App() {
     if (readyTimerRef.current) {
       clearTimeout(readyTimerRef.current);
       readyTimerRef.current = null;
-    }
-    if (newMode === 'sensor' && sensorAvailable && permissionGranted !== true) {
-      setShowPermissionBanner(true);
-    } else {
-      setShowPermissionBanner(false);
     }
   };
 
@@ -411,13 +409,13 @@ export default function App() {
               className="sensitivity-slider__input"
               aria-label="传感器灵敏度"
               min={1}
-              max={100}
+              max={190}
               value={sensitivity}
               onChange={(e) => handleSensitivityChange(parseInt(e.target.value, 10))}
             />
             <div className="sensitivity-slider__marks">
-              <span>低</span>
-              <span>高</span>
+              <span>低 (1)</span>
+              <span>高 (190)</span>
             </div>
           </div>
         )}

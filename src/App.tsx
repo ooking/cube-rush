@@ -18,6 +18,15 @@ type InputMode = 'stackmat' | 'sensor';
 const STORAGE_KEY = 'cube-rush-records';
 const MODE_KEY = 'cube-rush-mode';
 const HELP_SEEN_KEY = 'cube-rush-help-seen';
+const SENSITIVITY_KEY = 'cube-rush-sensitivity';
+
+/** 灵敏度(1-100) → 冲击阈值：灵敏度越高阈值越低 */
+function sensitivityToThreshold(sensitivity: number): number {
+  // sensitivity 1 → threshold 4.0 (很不灵敏)
+  // sensitivity 50 → threshold ~1.2 (默认)
+  // sensitivity 100 → threshold 0.2 (极度灵敏)
+  return 4.0 - (sensitivity - 1) * (3.8 / 99);
+}
 
 function loadRecords(): SolveRecord[] {
   try {
@@ -42,6 +51,10 @@ export default function App() {
   const [mode, setMode] = useState<InputMode>(loadMode);
   const [showPermissionBanner, setShowPermissionBanner] = useState(false);
   const [showHelp, setShowHelp] = useState(!localStorage.getItem(HELP_SEEN_KEY));
+  const [sensitivity, setSensitivity] = useState(() => {
+    const saved = localStorage.getItem(SENSITIVITY_KEY);
+    return saved ? parseInt(saved, 10) : 50;
+  });
   const { time, phase, start, stop, reset, setReady, setPhase } = useTimer();
   const readyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // 传感器模式：是否处于"就绪等待"状态（已停止，需要手动进入下一轮）
@@ -103,7 +116,15 @@ export default function App() {
   }, [mode, phase, start, stop, recordSolve]);
 
   const { sensorAvailable, permissionGranted, requestPermission, lastImpactStrength } =
-    useSensor(handleImpact, mode === 'sensor');
+    useSensor(handleImpact, mode === 'sensor', {
+      impactThreshold: sensitivityToThreshold(sensitivity),
+    });
+
+  // ── 灵敏度变更 ──
+  const handleSensitivityChange = (value: number) => {
+    setSensitivity(value);
+    localStorage.setItem(SENSITIVITY_KEY, String(value));
+  };
 
   // ── 切换到传感器模式时检查权限 ──
   useEffect(() => {
@@ -376,6 +397,29 @@ export default function App() {
           <span className="sensor-info__strength">
             冲击: {lastImpactStrength}g
           </span>
+        )}
+
+        {/* 传感器灵敏度滑块 */}
+        {mode === 'sensor' && phase === 'idle' && (
+          <div className="sensitivity-slider">
+            <div className="sensitivity-slider__header">
+              <span className="sensitivity-slider__label">灵敏度</span>
+              <span className="sensitivity-slider__value">{sensitivity}</span>
+            </div>
+            <input
+              type="range"
+              className="sensitivity-slider__input"
+              aria-label="传感器灵敏度"
+              min={1}
+              max={100}
+              value={sensitivity}
+              onChange={(e) => handleSensitivityChange(parseInt(e.target.value, 10))}
+            />
+            <div className="sensitivity-slider__marks">
+              <span>低</span>
+              <span>高</span>
+            </div>
+          </div>
         )}
       </main>
 

@@ -10,11 +10,14 @@ interface SolveRecord {
   time: number;
   scramble: string;
   date: number;
+  dnf?: boolean;
 }
 
-type InputMode = 'sensor' | 'touch';
+type InputMode = 'stackmat' | 'sensor';
 
 const STORAGE_KEY = 'cube-rush-records';
+const MODE_KEY = 'cube-rush-mode';
+const HELP_SEEN_KEY = 'cube-rush-help-seen';
 
 function loadRecords(): SolveRecord[] {
   try {
@@ -29,16 +32,28 @@ function saveRecords(records: SolveRecord[]) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(records));
 }
 
+function loadMode(): InputMode {
+  return (localStorage.getItem(MODE_KEY) as InputMode) || 'stackmat';
+}
+
 export default function App() {
   const [records, setRecords] = useState<SolveRecord[]>(loadRecords);
   const [scramble, setScramble] = useState(generateScramble);
-  const [mode, setMode] = useState<InputMode>('touch');
+  const [mode, setMode] = useState<InputMode>(loadMode);
   const [showPermissionBanner, setShowPermissionBanner] = useState(false);
+  const [showHelp, setShowHelp] = useState(!localStorage.getItem(HELP_SEEN_KEY));
   const { time, phase, start, stop, reset, setReady, setPhase } = useTimer();
-  const touchStartRef = useRef(0);
   const readyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 传感器模式：是否处于"就绪等待"状态（已停止，需要手动进入下一轮）
+  const sensorLockedRef = useRef(false);
 
-  // 记录并保存成绩
+  // ── 关闭帮助 ──
+  const dismissHelp = () => {
+    setShowHelp(false);
+    localStorage.setItem(HELP_SEEN_KEY, '1');
+  };
+
+  // ── 通用：记录成绩 ──
   const recordSolve = useCallback(
     (solveTime: number) => {
       const record: SolveRecord = {
@@ -52,78 +67,121 @@ export default function App() {
         saveRecords(next);
         return next;
       });
-      setScramble(generateScramble());
     },
     [scramble]
   );
 
-  // 传感器模式的回调
-  const handlePickup = useCallback(() => {
-    if (phase === 'idle' || phase === 'stopped') {
-      start();
-    }
-  }, [phase, start]);
+  // ── 进入下一轮 ──
+  const nextRound = useCallback(() => {
+    setScramble(generateScramble());
+    setPhase('idle');
+    reset();
+    sensorLockedRef.current = false;
+  }, [setPhase, reset]);
 
-  const handlePutDown = useCallback(() => {
-    if (phase === 'running') {
+  // ── 取消/DNF 当前计时 ──
+  const cancelSolve = useCallback(() => {
+    stop();
+    reset();
+    setPhase('idle');
+    sensorLockedRef.current = false;
+  }, [stop, reset, setPhase]);
+
+  // ── 传感器模式：冲击检测回调 ──
+  const handleImpact = useCallback(() => {
+    if (mode !== 'sensor') return;
+    // 已停止并锁定，不响应冲击，必须手动下一轮
+    if (sensorLockedRef.current) return;
+
+    if (phase === 'idle') {
+      start();
+    } else if (phase === 'running') {
       const finalTime = stop();
       recordSolve(finalTime);
+      sensorLockedRef.current = true; // 锁定，防止自动进入下一轮
     }
-  }, [phase, stop, recordSolve]);
+  }, [mode, phase, start, stop, recordSolve]);
 
-  const { sensorAvailable, permissionGranted, requestPermission, resetSensor } =
-    useSensor(handlePickup, handlePutDown, mode === 'sensor' && phase !== 'ready');
+  const { sensorAvailable, permissionGranted, requestPermission, lastImpactStrength } =
+    useSensor(handleImpact, mode === 'sensor');
 
-  // 切换到传感器模式时检查权限
+  // ── 切换到传感器模式时检查权限 ──
   useEffect(() => {
     if (mode === 'sensor' && permissionGranted === null && sensorAvailable) {
       setShowPermissionBanner(true);
     }
   }, [mode, permissionGranted, sensorAvailable]);
 
-  // 触摸模式处理
-  const handleTouchStart = useCallback(() => {
-    if (mode !== 'touch') return;
+  // ── Stackmat 触摸模式 ──
+  const handleTouchStart = useCallback(
+    (e: React.PointerEvent) => {
+      if (mode !== 'stackmat') return;
+      e.preventDefault();
 
-    if (phase === 'running') {
-      const finalTime = stop();
-      recordSolve(finalTime);
-      return;
-    }
+      if (phase === 'running') {
+        // 计时中 → 拍停
+        const finalTime = stop();
+        recordSolve(finalTime);
+        return;
+      }
 
-    touchStartRef.current = Date.now();
-    readyTimerRef.current = setTimeout(() => {
-      setReady();
-    }, 300);
-  }, [mode, phase, stop, recordSolve, setReady]);
+      // 已停止 → 忽略，需要点"下一轮"
+      if (phase === 'stopped') return;
 
-  const handleTouchEnd = useCallback(() => {
-    if (mode !== 'touch') return;
+      // idle → 按住准备
+      readyTimerRef.current = setTimeout(() => {
+        setReady();
+      }, 400);
+    },
+    [mode, phase, stop, recordSolve, setReady]
+  );
 
-    if (readyTimerRef.current) {
-      clearTimeout(readyTimerRef.current);
-      readyTimerRef.current = null;
-    }
+  const handleTouchEnd = useCallback(
+    (e: React.PointerEvent) => {
+      if (mode !== 'stackmat') return;
+      e.preventDefault();
 
-    if (phase === 'ready') {
-      start();
-    } else if (phase === 'stopped') {
-      setPhase('idle');
-    }
-  }, [mode, phase, start, setPhase]);
+      if (readyTimerRef.current) {
+        clearTimeout(readyTimerRef.current);
+        readyTimerRef.current = null;
+      }
 
-  // 键盘空格键支持（桌面调试）
+      if (phase === 'ready') {
+        start();
+      }
+    },
+    [mode, phase, start]
+  );
+
+  // ── 键盘空格 (桌面调试) ──
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.code !== 'Space' || e.repeat) return;
+      if (showHelp) return; // 帮助弹窗打开时忽略
       e.preventDefault();
-      handleTouchStart();
+
+      if (mode === 'stackmat') {
+        if (phase === 'running') {
+          const finalTime = stop();
+          recordSolve(finalTime);
+        } else if (phase === 'stopped') {
+          // 停止后空格不做任何事
+        } else if (phase === 'idle') {
+          readyTimerRef.current = setTimeout(() => setReady(), 400);
+        }
+      } else {
+        handleImpact();
+      }
     };
 
     const handleKeyUp = (e: KeyboardEvent) => {
       if (e.code !== 'Space') return;
       e.preventDefault();
-      handleTouchEnd();
+      if (readyTimerRef.current) {
+        clearTimeout(readyTimerRef.current);
+        readyTimerRef.current = null;
+      }
+      if (phase === 'ready') start();
     };
 
     window.addEventListener('keydown', handleKeyDown);
@@ -132,44 +190,29 @@ export default function App() {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [handleTouchStart, handleTouchEnd]);
+  }, [mode, phase, start, stop, recordSolve, setReady, handleImpact, showHelp]);
 
-  // 请求传感器权限
+  // ── 权限 ──
   const handleRequestPermission = async () => {
     const granted = await requestPermission();
     setShowPermissionBanner(false);
     if (!granted) {
-      setMode('touch');
+      setMode('stackmat');
+      localStorage.setItem(MODE_KEY, 'stackmat');
     }
   };
 
-  // 刷新打乱
-  const refreshScramble = () => {
-    setScramble(generateScramble());
-  };
-
-  // 删除单条记录
-  const deleteRecord = (id: number) => {
-    setRecords((prev) => {
-      const next = prev.filter((r) => r.id !== id);
-      saveRecords(next);
-      return next;
-    });
-  };
-
-  // 清空所有记录
-  const clearRecords = () => {
-    setRecords([]);
-    saveRecords([]);
-    reset();
-    resetSensor();
-  };
-
-  // 切换模式
+  // ── 模式切换 ──
   const switchMode = (newMode: InputMode) => {
     setMode(newMode);
+    localStorage.setItem(MODE_KEY, newMode);
+    setPhase('idle');
     reset();
-    resetSensor();
+    sensorLockedRef.current = false;
+    if (readyTimerRef.current) {
+      clearTimeout(readyTimerRef.current);
+      readyTimerRef.current = null;
+    }
     if (newMode === 'sensor' && sensorAvailable && permissionGranted !== true) {
       setShowPermissionBanner(true);
     } else {
@@ -177,40 +220,60 @@ export default function App() {
     }
   };
 
-  // 统计
-  const times = records.map((r) => r.time);
+  // ── 打乱 ──
+  const refreshScramble = () => setScramble(generateScramble());
+
+  // ── 删除 / 清空 ──
+  const deleteRecord = (id: number) => {
+    setRecords((prev) => {
+      const next = prev.filter((r) => r.id !== id);
+      saveRecords(next);
+      return next;
+    });
+  };
+  const clearRecords = () => {
+    setRecords([]);
+    saveRecords([]);
+    setPhase('idle');
+    reset();
+    sensorLockedRef.current = false;
+  };
+
+  // ── 统计 ──
+  const times = records.filter((r) => !r.dnf).map((r) => r.time);
   const bestTime = times.length > 0 ? Math.min(...times) : null;
   const ao5 = calcAoN(times, 5);
   const ao12 = calcAoN(times, 12);
 
-  // 提示文字
+  // ── 提示文案 ──
   const getHintText = () => {
     if (mode === 'sensor') {
       switch (phase) {
         case 'idle':
-        case 'stopped':
-          return '拿起手机开始计时';
+          return '轻拍手机或拿起魔方 → 开始计时';
         case 'running':
-          return '放回桌面停止计时';
+          return '还原后轻拍手机 → 停止计时';
+        case 'stopped':
+          return '';
         default:
           return '';
       }
     }
     switch (phase) {
       case 'idle':
-        return '长按屏幕准备，松开开始';
+        return '按住屏幕准备';
       case 'ready':
-        return '松开手指开始计时';
+        return '松开手指 → 开始计时';
       case 'running':
-        return '点击任意位置停止';
+        return '还原后拍一下屏幕停止';
       case 'stopped':
-        return '点击任意位置继续';
+        return '';
       default:
         return '';
     }
   };
 
-  // 尝试唤醒锁定
+  // ── 唤醒锁定 ──
   useEffect(() => {
     let wakeLock: any = null;
     const requestWakeLock = async () => {
@@ -218,14 +281,10 @@ export default function App() {
         if ('wakeLock' in navigator) {
           wakeLock = await (navigator as any).wakeLock.request('screen');
         }
-      } catch {
-        // 忽略
-      }
+      } catch { /* 忽略 */ }
     };
     requestWakeLock();
-    return () => {
-      if (wakeLock) wakeLock.release();
-    };
+    return () => { if (wakeLock) wakeLock.release(); };
   }, []);
 
   return (
@@ -233,19 +292,24 @@ export default function App() {
       {/* Header */}
       <header className="header">
         <h1 className="header__title">Cube Rush</h1>
-        <div className="mode-toggle">
-          <button
-            className={`mode-toggle__btn ${mode === 'touch' ? 'mode-toggle__btn--active' : ''}`}
-            onClick={() => switchMode('touch')}
-          >
-            ✋ 触摸
+        <div className="header__actions">
+          <button className="header__help-btn" onClick={() => setShowHelp(true)}>
+            ?
           </button>
-          <button
-            className={`mode-toggle__btn ${mode === 'sensor' ? 'mode-toggle__btn--active' : ''}`}
-            onClick={() => switchMode('sensor')}
-          >
-            📱 传感器
-          </button>
+          <div className="mode-toggle">
+            <button
+              className={`mode-toggle__btn ${mode === 'stackmat' ? 'mode-toggle__btn--active' : ''}`}
+              onClick={() => switchMode('stackmat')}
+            >
+              🤚 Stackmat
+            </button>
+            <button
+              className={`mode-toggle__btn ${mode === 'sensor' ? 'mode-toggle__btn--active' : ''}`}
+              onClick={() => switchMode('sensor')}
+            >
+              📱 传感器
+            </button>
+          </div>
         </div>
       </header>
 
@@ -262,15 +326,13 @@ export default function App() {
 
       {/* Timer Display */}
       <main className="timer-area">
-        {mode === 'touch' && phase !== 'running' && (
+        {/* Stackmat 触摸区：只在 idle 和 running 时激活 */}
+        {mode === 'stackmat' && (phase === 'idle' || phase === 'ready' || phase === 'running') && (
           <div
             className="touch-zone"
             onPointerDown={handleTouchStart}
             onPointerUp={handleTouchEnd}
           />
-        )}
-        {mode === 'touch' && phase === 'running' && (
-          <div className="touch-zone" onPointerDown={handleTouchStart} />
         )}
 
         <div className={`timer__time timer__time--${phase}`}>
@@ -280,6 +342,41 @@ export default function App() {
         <div className={`timer__hint ${phase === 'ready' ? 'timer__hint--accent' : ''}`}>
           {getHintText()}
         </div>
+
+        {/* 计时中：取消按钮 */}
+        {phase === 'running' && (
+          <button className="action-btn action-btn--cancel" onClick={cancelSolve}>
+            ✕ 取消本次
+          </button>
+        )}
+
+        {/* 停止后：操作按钮区 */}
+        {phase === 'stopped' && (
+          <div className="stopped-actions">
+            <button className="action-btn action-btn--next" onClick={nextRound}>
+              ▶ 下一轮
+            </button>
+            <button
+              className="action-btn action-btn--delete"
+              onClick={() => {
+                // 删除最近一条记录
+                if (records.length > 0) {
+                  deleteRecord(records[0].id);
+                }
+                nextRound();
+              }}
+            >
+              🗑 删除此次
+            </button>
+          </div>
+        )}
+
+        {/* 传感器模式冲击指示 */}
+        {mode === 'sensor' && lastImpactStrength > 0 && phase === 'running' && (
+          <span className="sensor-info__strength">
+            冲击: {lastImpactStrength}g
+          </span>
+        )}
       </main>
 
       {/* Stats */}
@@ -314,7 +411,6 @@ export default function App() {
             </button>
           )}
         </div>
-
         {records.length === 0 ? (
           <div className="empty-state">
             <div className="empty-state__icon">🎲</div>
@@ -329,10 +425,7 @@ export default function App() {
               >
                 <span className="history__index">#{records.length - index}</span>
                 <span className="history__time">{formatTime(record.time)}</span>
-                <button
-                  className="history__delete"
-                  onClick={() => deleteRecord(record.id)}
-                >
+                <button className="history__delete" onClick={() => deleteRecord(record.id)}>
                   ✕
                 </button>
               </div>
@@ -345,11 +438,92 @@ export default function App() {
       {showPermissionBanner && (
         <div className="permission-banner">
           <p className="permission-banner__text">
-            需要访问运动传感器以检测手机的拾起和放下动作
+            需要访问运动传感器以检测魔方放置和拿起时的振动
           </p>
           <button className="permission-banner__btn" onClick={handleRequestPermission}>
             授权传感器
           </button>
+        </div>
+      )}
+
+      {/* Help Modal */}
+      {showHelp && (
+        <div className="help-overlay" onClick={dismissHelp}>
+          <div className="help-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="help-modal__header">
+              <h2 className="help-modal__title">使用说明</h2>
+              <button className="help-modal__close" onClick={dismissHelp}>✕</button>
+            </div>
+
+            <div className="help-modal__content">
+              <div className="help-section">
+                <h3 className="help-section__title">🤚 Stackmat 模式</h3>
+                <div className="help-steps">
+                  <div className="help-step">
+                    <span className="help-step__num">1</span>
+                    <span>按照打乱公式打乱魔方</span>
+                  </div>
+                  <div className="help-step">
+                    <span className="help-step__num">2</span>
+                    <span><strong>按住屏幕</strong>不放，等待显示"准备"</span>
+                  </div>
+                  <div className="help-step">
+                    <span className="help-step__num">3</span>
+                    <span><strong>松开手指</strong>，计时开始，拿起魔方还原</span>
+                  </div>
+                  <div className="help-step">
+                    <span className="help-step__num">4</span>
+                    <span>还原后<strong>拍一下屏幕</strong>停止计时</span>
+                  </div>
+                  <div className="help-step">
+                    <span className="help-step__num">5</span>
+                    <span>点击 <strong>▶ 下一轮</strong> 继续</span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="help-section">
+                <h3 className="help-section__title">📱 传感器模式</h3>
+                <div className="help-steps">
+                  <div className="help-step">
+                    <span className="help-step__num">1</span>
+                    <span>手机<strong>平放桌上</strong>，魔方放在旁边</span>
+                  </div>
+                  <div className="help-step">
+                    <span className="help-step__num">2</span>
+                    <span><strong>轻拍手机</strong>或拿起魔方（振动触发），计时开始</span>
+                  </div>
+                  <div className="help-step">
+                    <span className="help-step__num">3</span>
+                    <span>还原后<strong>再次轻拍手机</strong>停止计时</span>
+                  </div>
+                  <div className="help-step">
+                    <span className="help-step__num">4</span>
+                    <span>点击 <strong>▶ 下一轮</strong> 继续</span>
+                  </div>
+                </div>
+                <p className="help-note">⚠️ 传感器模式需要 HTTPS 环境</p>
+              </div>
+
+              <div className="help-section">
+                <h3 className="help-section__title">💡 其他操作</h3>
+                <div className="help-steps">
+                  <div className="help-step">
+                    <span className="help-step__num">✕</span>
+                    <span>计时中点击 <strong>✕ 取消本次</strong> 可放弃当前还原</span>
+                  </div>
+                  <div className="help-step">
+                    <span className="help-step__num">🗑</span>
+                    <span>停止后点击 <strong>🗑 删除此次</strong> 可删除本次成绩</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <button className="help-modal__ok" onClick={dismissHelp}>
+              知道了！
+            </button>
+          </div>
         </div>
       )}
     </div>
